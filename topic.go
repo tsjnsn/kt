@@ -9,13 +9,29 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"crypto/tls"
+	"crypto/x509"
 
+	"github.com/pavel-v-chernykh/keystore-go"
 	"github.com/Shopify/sarama"
 )
+
+func check(e error) {
+    if e != nil {
+        panic(e)
+    }
+}
 
 type topicArgs struct {
 	brokers    string
 	filter     string
+	cert       string
+	key        string
+	keystore   string
+	keypass    string
+	keyalias   string
+	caalias   string
+	noverify   bool
 	partitions bool
 	leaders    bool
 	replicas   bool
@@ -26,7 +42,14 @@ type topicArgs struct {
 
 type topicCmd struct {
 	brokers    []string
+	cert       string
+	key        string
+	keystore   string
+	keypass    string
+	keyalias   string
+	caalias   string
 	filter     *regexp.Regexp
+	noverify   bool
 	partitions bool
 	leaders    bool
 	replicas   bool
@@ -62,6 +85,13 @@ func (cmd *topicCmd) parseFlags(as []string) topicArgs {
 	flags.BoolVar(&args.leaders, "leaders", false, "Include leader information per partition.")
 	flags.BoolVar(&args.replicas, "replicas", false, "Include replica ids per partition.")
 	flags.StringVar(&args.filter, "filter", "", "Regex to filter topics by name.")
+	flags.StringVar(&args.cert, "cert", "", "PEM encoded certificate to use for SSL.")
+	flags.StringVar(&args.key, "key", "", "PEM encoded key to use for SSL.")
+	flags.StringVar(&args.keystore, "keystore", "", "Keystore to use for SSL.")
+	flags.StringVar(&args.keypass, "keypass", "", "Password for the store used in -keystore.")
+	flags.StringVar(&args.keyalias, "keyalias", "", "Alias of the entry in the keystore that contains the private key.")
+	flags.StringVar(&args.caalias, "caalias", "", "Alias of the entry in the keystore that contains the root CA to verify the cert chain.")
+	flags.BoolVar(&args.noverify, "noverify", false, "Whether or not to verify the provided certificate when using SSL.")
 	flags.BoolVar(&args.verbose, "verbose", false, "More verbose logging to stderr.")
 	flags.BoolVar(&args.pretty, "pretty", true, "Control output pretty printing.")
 	flags.StringVar(&args.version, "version", "", "Kafka protocol version")
@@ -111,13 +141,34 @@ func (cmd *topicCmd) parseArgs(as []string) {
 	cmd.replicas = args.replicas
 	cmd.pretty = args.pretty
 	cmd.verbose = args.verbose
+	cmd.cert = args.cert
+	cmd.key = args.key
+	cmd.keystore = args.keystore
+	cmd.keypass = args.keypass
+	cmd.noverify = args.noverify
+	cmd.keyalias = args.keyalias
+	cmd.caalias = args.caalias
 	cmd.version = kafkaVersion(args.version)
+}
+
+func readKeyStore(filename string, password []byte) keystore.KeyStore {
+	f, err := os.Open(filename)
+	defer f.Close()
+	if err != nil {
+		failf("Error opening keystore file=%v", err)
+	}
+	keyStore, err := keystore.Decode(f, password)
+	if err != nil {
+		failf("Error decoding keystore data=%v", err)
+	}
+	return keyStore
 }
 
 func (cmd *topicCmd) connect() {
 	var (
 		err error
 		usr *user.User
+	 	capool *x509.CertPool
 		cfg = sarama.NewConfig()
 	)
 
@@ -127,6 +178,57 @@ func (cmd *topicCmd) connect() {
 		fmt.Fprintf(os.Stderr, "Failed to read current user err=%v", err)
 	}
 	cfg.ClientID = "kt-topic-" + sanitizeUsername(usr.Username)
+
+	if cmd.keystore != "" {
+		if cmd.keyalias == "" {
+			failf("no keyalias provided for keystore")
+		}
+		password := []byte(cmd.keypass)
+		ks := readKeyStore(cmd.keystore, password)
+		keyEntry := ks[cmd.keyalias].(*keystore.PrivateKeyEntry)
+
+		key, err := x509.ParsePKCS8PrivateKey(keyEntry.PrivKey)
+		if err != nil {
+			failf("failed to parse the key as PKCS8=%v", err)
+		}
+
+		var cert tls.Certificate
+		cert.Certificate = append(cert.Certificate, keyEntry.CertChain[0].Content)
+		cert.PrivateKey = key
+
+		if (cmd.caalias != "") {
+			caEntry := ks[cmd.caalias].(*keystore.TrustedCertificateEntry)
+			capool = x509.NewCertPool()
+			certs, err := x509.ParseCertificates(caEntry.Certificate.Content)
+			if err != nil {
+				fmt.Printf("Error parsing ca certificate: %v", err)
+			}
+
+			for _, element := range certs {
+				capool.AddCert(element)
+			}
+		}
+
+		cfg.Net.TLS.Enable = true
+		cfg.Net.TLS.Config = &tls.Config {
+			InsecureSkipVerify: cmd.noverify,
+			Certificates: []tls.Certificate{cert},
+			RootCAs: capool,
+		}
+	}
+
+	if cmd.cert != "" && cmd.key != "" {
+		cfg.Net.TLS.Enable = true
+		cert, err := tls.LoadX509KeyPair(cmd.cert, cmd.key)
+		if err != nil {
+			failf("failed to load PEM cert or key err=%v", err)
+		}
+		cfg.Net.TLS.Config = &tls.Config {
+			InsecureSkipVerify: cmd.noverify,
+			Certificates: []tls.Certificate{cert},
+		}
+	}
+
 	if cmd.verbose {
 		fmt.Fprintf(os.Stderr, "sarama client configuration %#v\n", cfg)
 	}
