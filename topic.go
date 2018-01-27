@@ -135,18 +135,39 @@ func (cmd *topicCmd) parseArgs(as []string) {
 		failf("invalid regex for filter err=%s", err)
 	}
 
+	if args.keystore != "" {
+		if args.keyalias == "" {
+			failf("no keyalias provided for keystore")
+		}
+		if args.keypass == "" {
+			failf("no password provided for keystore")
+		}
+	}
+
+	if args.keystore != ""  && (args.key != "" || args.cert != "") {
+		if args.keyalias == "" {
+			failf("cannot use keystore with key and cert options")
+		}
+	}
+
+	if (args.key != ""  && args.cert == "") || (args.key == ""  && args.cert != "") {
+		if args.keyalias == "" {
+			failf("must provide both cert and key")
+		}
+	}
+
 	cmd.filter = re
 	cmd.partitions = args.partitions
 	cmd.leaders = args.leaders
 	cmd.replicas = args.replicas
+	cmd.keystore = args.keystore
+	cmd.keyalias = args.keyalias
+	cmd.keypass = args.keypass
 	cmd.pretty = args.pretty
 	cmd.verbose = args.verbose
 	cmd.cert = args.cert
 	cmd.key = args.key
-	cmd.keystore = args.keystore
-	cmd.keypass = args.keypass
 	cmd.noverify = args.noverify
-	cmd.keyalias = args.keyalias
 	cmd.caalias = args.caalias
 	cmd.version = kafkaVersion(args.version)
 }
@@ -180,9 +201,6 @@ func (cmd *topicCmd) connect() {
 	cfg.ClientID = "kt-topic-" + sanitizeUsername(usr.Username)
 
 	if cmd.keystore != "" {
-		if cmd.keyalias == "" {
-			failf("no keyalias provided for keystore")
-		}
 		password := []byte(cmd.keypass)
 		ks := readKeyStore(cmd.keystore, password)
 		keyEntry := ks[cmd.keyalias].(*keystore.PrivateKeyEntry)
@@ -216,8 +234,7 @@ func (cmd *topicCmd) connect() {
 			RootCAs: capool,
 		}
 	}
-
-	if cmd.cert != "" && cmd.key != "" {
+	else if cmd.cert != "" && cmd.key != "" {
 		cfg.Net.TLS.Enable = true
 		cert, err := tls.LoadX509KeyPair(cmd.cert, cmd.key)
 		if err != nil {
