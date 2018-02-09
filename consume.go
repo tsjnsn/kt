@@ -13,7 +13,10 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"crypto/tls"
+	"crypto/x509"
 
+	"github.com/pavel-v-chernykh/keystore-go"
 	"github.com/Shopify/sarama"
 )
 
@@ -27,6 +30,13 @@ type consumeCmd struct {
 	encodeValue string
 	encodeKey   string
 	pretty      bool
+	cert       string
+	key        string
+	keystore   string
+	keypass    string
+	keyalias   string
+	caalias   string
+	noverify   bool
 
 	client   sarama.Client
 	consumer sarama.Consumer
@@ -78,6 +88,13 @@ type consumeArgs struct {
 	encodeValue string
 	encodeKey   string
 	pretty      bool
+	cert       string
+	key        string
+	keystore   string
+	keypass    string
+	keyalias   string
+	caalias   string
+	noverify   bool
 }
 
 func parseOffset(str string) (offset, error) {
@@ -202,6 +219,13 @@ func (cmd *consumeCmd) parseArgs(as []string) {
 	cmd.timeout = args.timeout
 	cmd.verbose = args.verbose
 	cmd.pretty = args.pretty
+	cmd.cert = args.cert
+	cmd.key = args.key
+	cmd.keystore = args.keystore
+	cmd.keypass = args.keypass
+	cmd.noverify = args.noverify
+	cmd.keyalias = args.keyalias
+	cmd.caalias = args.caalias
 	cmd.version = kafkaVersion(args.version)
 
 	if args.encodeValue != "string" && args.encodeValue != "hex" && args.encodeValue != "base64" {
@@ -249,6 +273,14 @@ func (cmd *consumeCmd) parseFlags(as []string) consumeArgs {
 	flags.StringVar(&args.version, "version", "", "Kafka protocol version")
 	flags.StringVar(&args.encodeValue, "encodevalue", "string", "Present message value as (string|hex|base64), defaults to string.")
 	flags.StringVar(&args.encodeKey, "encodekey", "string", "Present message key as (string|hex|base64), defaults to string.")
+	flags.StringVar(&args.cert, "cert", "", "PEM encoded certificate to use for SSL.")
+	flags.StringVar(&args.key, "key", "", "PEM encoded key to use for SSL.")
+	flags.StringVar(&args.keystore, "keystore", "", "Keystore to use for SSL.")
+	flags.StringVar(&args.keypass, "keypass", "", "Password for the store used in -keystore.")
+	flags.StringVar(&args.keyalias, "keyalias", "", "Alias of the entry in the keystore that contains the private key.")
+	flags.StringVar(&args.caalias, "caalias", "", "Alias of the entry in the keystore that contains the root CA to verify the cert chain.")
+	flags.BoolVar(&args.noverify, "noverify", false, "Whether or not to verify the provided certificate when using SSL.")
+
 
 	flags.Usage = func() {
 		fmt.Fprintln(os.Stderr, "Usage of consume:")
@@ -265,12 +297,64 @@ func (cmd *consumeCmd) setupClient() {
 	var (
 		err error
 		usr *user.User
+		capool *x509.CertPool
 		cfg = sarama.NewConfig()
 	)
 	cfg.Version = cmd.version
 	if usr, err = user.Current(); err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to read current user err=%v", err)
 	}
+
+	if cmd.keystore != "" {
+		if cmd.keyalias == "" {
+			failf("no keyalias provided for keystore")
+		}
+		password := []byte(cmd.keypass)
+		ks := readKeyStore(cmd.keystore, password)
+		keyEntry := ks[cmd.keyalias].(*keystore.PrivateKeyEntry)
+
+		key, err := x509.ParsePKCS8PrivateKey(keyEntry.PrivKey)
+		if err != nil {
+			failf("failed to parse the key as PKCS8=%v", err)
+		}
+
+		var cert tls.Certificate
+		cert.Certificate = append(cert.Certificate, keyEntry.CertChain[0].Content)
+		cert.PrivateKey = key
+
+		if (cmd.caalias != "") {
+			caEntry := ks[cmd.caalias].(*keystore.TrustedCertificateEntry)
+			capool = x509.NewCertPool()
+			certs, err := x509.ParseCertificates(caEntry.Certificate.Content)
+			if err != nil {
+				fmt.Printf("Error parsing ca certificate: %v", err)
+			}
+
+			for _, element := range certs {
+				capool.AddCert(element)
+			}
+		}
+
+		cfg.Net.TLS.Enable = true
+		cfg.Net.TLS.Config = &tls.Config {
+			InsecureSkipVerify: cmd.noverify,
+			Certificates: []tls.Certificate{cert},
+			RootCAs: capool,
+		}
+	}
+
+	if cmd.cert != "" && cmd.key != "" {
+		cfg.Net.TLS.Enable = true
+		cert, err := tls.LoadX509KeyPair(cmd.cert, cmd.key)
+		if err != nil {
+			failf("failed to load PEM cert or key err=%v", err)
+		}
+		cfg.Net.TLS.Config = &tls.Config {
+			InsecureSkipVerify: cmd.noverify,
+			Certificates: []tls.Certificate{cert},
+		}
+	}
+
 	cfg.ClientID = "kt-consume-" + sanitizeUsername(usr.Username)
 	if cmd.verbose {
 		fmt.Fprintf(os.Stderr, "sarama client configuration %#v\n", cfg)
