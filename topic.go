@@ -233,8 +233,7 @@ func (cmd *topicCmd) connect() {
 			Certificates: []tls.Certificate{cert},
 			RootCAs: capool,
 		}
-	}
-	else if cmd.cert != "" && cmd.key != "" {
+	} else if cmd.cert != "" && cmd.key != "" {
 		cfg.Net.TLS.Enable = true
 		cert, err := tls.LoadX509KeyPair(cmd.cert, cmd.key)
 		if err != nil {

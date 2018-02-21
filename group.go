@@ -10,7 +10,10 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"crypto/tls"
+	"crypto/x509"
 
+	"github.com/pavel-v-chernykh/keystore-go"
 	"github.com/Shopify/sarama"
 )
 
@@ -25,6 +28,13 @@ type groupCmd struct {
 	pretty     bool
 	version    sarama.KafkaVersion
 	offsets    bool
+	cert       string
+	key        string
+	keystore   string
+	keypass    string
+	keyalias   string
+	caalias   string
+	noverify   bool
 
 	client sarama.Client
 }
@@ -306,7 +316,53 @@ func (cmd *groupCmd) saramaConfig() *sarama.Config {
 		err error
 		usr *user.User
 		cfg = sarama.NewConfig()
+		capool *x509.CertPool
 	)
+
+	if cmd.keystore != "" {
+		password := []byte(cmd.keypass)
+		ks := readKeyStore(cmd.keystore, password)
+		keyEntry := ks[cmd.keyalias].(*keystore.PrivateKeyEntry)
+
+		key, err := x509.ParsePKCS8PrivateKey(keyEntry.PrivKey)
+		if err != nil {
+			failf("failed to parse the key as PKCS8=%v", err)
+		}
+
+		var cert tls.Certificate
+		cert.Certificate = append(cert.Certificate, keyEntry.CertChain[0].Content)
+		cert.PrivateKey = key
+
+		if (cmd.caalias != "") {
+			caEntry := ks[cmd.caalias].(*keystore.TrustedCertificateEntry)
+			capool = x509.NewCertPool()
+			certs, err := x509.ParseCertificates(caEntry.Certificate.Content)
+			if err != nil {
+				fmt.Printf("Error parsing ca certificate: %v", err)
+			}
+
+			for _, element := range certs {
+				capool.AddCert(element)
+			}
+		}
+
+		cfg.Net.TLS.Enable = true
+		cfg.Net.TLS.Config = &tls.Config {
+			InsecureSkipVerify: cmd.noverify,
+			Certificates: []tls.Certificate{cert},
+			RootCAs: capool,
+		}
+	} else if cmd.cert != "" && cmd.key != "" {
+		cfg.Net.TLS.Enable = true
+		cert, err := tls.LoadX509KeyPair(cmd.cert, cmd.key)
+		if err != nil {
+			failf("failed to load PEM cert or key err=%v", err)
+		}
+		cfg.Net.TLS.Config = &tls.Config {
+			InsecureSkipVerify: cmd.noverify,
+			Certificates: []tls.Certificate{cert},
+		}
+	}
 
 	cfg.Version = cmd.version
 	if usr, err = user.Current(); err != nil {
@@ -339,6 +395,13 @@ func (cmd *groupCmd) parseArgs(as []string) {
 	cmd.pretty = args.pretty
 	cmd.offsets = args.offsets
 	cmd.version = kafkaVersion(args.version)
+	cmd.keystore = args.keystore
+    cmd.keyalias = args.keyalias
+	cmd.keypass = args.keypass
+	cmd.cert = args.cert
+	cmd.key = args.key
+	cmd.noverify = args.noverify
+	cmd.caalias = args.caalias
 
 	switch args.partitions {
 	case "", "all":
@@ -411,6 +474,13 @@ type groupArgs struct {
 	pretty     bool
 	version    string
 	offsets    bool
+	cert       string
+	key        string
+	keystore   string
+	keypass    string
+	keyalias   string
+	caalias   string
+	noverify   bool
 }
 
 func (cmd *groupCmd) parseFlags(as []string) groupArgs {
@@ -425,6 +495,13 @@ func (cmd *groupCmd) parseFlags(as []string) groupArgs {
 	flags.BoolVar(&args.pretty, "pretty", true, "Control output pretty printing.")
 	flags.StringVar(&args.version, "version", "", "Kafka protocol version")
 	flags.StringVar(&args.partitions, "partitions", allPartitionsHuman, "comma separated list of partitions to limit offsets to, or all")
+	flags.StringVar(&args.cert, "cert", "", "PEM encoded certificate to use for SSL.")
+	flags.StringVar(&args.key, "key", "", "PEM encoded key to use for SSL.")
+	flags.StringVar(&args.keystore, "keystore", "", "Keystore to use for SSL.")
+	flags.StringVar(&args.keypass, "keypass", "", "Password for the store used in -keystore.")
+	flags.StringVar(&args.keyalias, "keyalias", "", "Alias of the entry in the keystore that contains the private key.")
+	flags.StringVar(&args.caalias, "caalias", "", "Alias of the entry in the keystore that contains the root CA to verify the cert chain.")
+	flags.BoolVar(&args.noverify, "noverify", false, "Whether or not to verify the provided certificate when using SSL.")
 	flags.BoolVar(&args.offsets, "offsets", true, "Controls if offsets should be fetched (defauls to true)")
 
 	flags.Usage = func() {
