@@ -33,12 +33,12 @@ steps:
     image: socialengine/github-release
     environment:
       GITHUB_RELEASE_VERSION: v0.7.2
+      GITHUB_TOKEN:
+        from_secret: GITHUB_TOKEN
     commands:
       - "github-release release --user tsjnsn --repo kt --tag ${DRONE_TAG} --name ${DRONE_TAG}"
       - "github-release upload  --user tsjnsn --repo kt --tag ${DRONE_TAG} --name kt-linux --file ./kt-linux"
       - "github-release upload  --user tsjnsn --repo kt --tag ${DRONE_TAG} --name kt-darwin --file ./kt-darwin"
-    secrets:
-      - GITHUB_TOKEN
     when:
       event:
         - tag
